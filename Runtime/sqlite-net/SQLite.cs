@@ -160,7 +160,7 @@ namespace SQLite
 		FullTextSearch4 = 0x200
 	}
 
-	public interface ISQLiteConnection : IDisposable
+	public partial interface ISQLiteConnection : IDisposable
 	{
 		Sqlite3DatabaseHandle Handle { get; }
 		string DatabasePath { get; }
@@ -183,7 +183,7 @@ namespace SQLite
 		void Commit ();
 		SQLiteCommand CreateCommand (string cmdText, params object[] ps);
 		SQLiteCommand CreateCommand (string cmdText, Dictionary<string, object> args);
-		int CreateIndex (string indexName, string tableName, string[] columnNames, bool unique = false);
+		int CreateIndex (string indexName, string tableName, IReadOnlyList<string> columnNames, bool unique = false);
 		int CreateIndex (string indexName, string tableName, string columnName, bool unique = false);
 		int CreateIndex (string tableName, string columnName, bool unique = false);
 		int CreateIndex (string tableName, string[] columnNames, bool unique = false);
@@ -558,8 +558,8 @@ namespace SQLite
 		public IEnumerable<TableMapping> TableMappings {
 			get {
 				lock (_mappings) {
-					return new List<TableMapping> (_mappings.Values);
-				}
+                    return _mappings.Values;
+                }
 			}
 		}
 
@@ -614,7 +614,12 @@ namespace SQLite
 		{
 			public int Order;
 			public string ColumnName;
-		}
+            internal static IndexedColumnComparer Comparer = new IndexedColumnComparer();
+            internal class IndexedColumnComparer : IComparer<IndexedColumn>
+            {
+                public int Compare(IndexedColumn x, IndexedColumn y) => x.Order.CompareTo(y.Order);
+            }
+        }
 
 		private struct IndexInfo
 		{
@@ -709,7 +714,7 @@ namespace SQLite
 				MigrateTable (map, existingCols);
 			}
 
-			var indexes = new Dictionary<string, IndexInfo> ();
+            var indexes = DictionaryPool<string, IndexInfo>.Shared.Take();
 			foreach (var c in map.Columns) {
 				foreach (var i in c.Indices) {
 					var iname = i.Name ?? map.TableName + "_" + c.Name;
@@ -734,12 +739,19 @@ namespace SQLite
 				}
 			}
 
+            var columns = ListPool<string>.Shared.Take();
 			foreach (var indexName in indexes.Keys) {
+                columns.Clear();
 				var index = indexes[indexName];
-				var columns = index.Columns.OrderBy (i => i.Order).Select (i => i.ColumnName).ToArray ();
+                index.Columns.Sort(IndexedColumn.Comparer);
+                foreach (var i in index.Columns)
+                {
+                    columns.Add(i.ColumnName);
+                }
 				CreateIndex (indexName, index.TableName, columns, index.Unique);
 			}
-
+            ListPool<string>.Shared.Return(columns);
+            DictionaryPool<string, IndexInfo>.Shared.Return(indexes);
 			return result;
 		}
 
@@ -840,14 +852,14 @@ namespace SQLite
 		/// <param name="columnNames">An array of column names to index</param>
 		/// <param name="unique">Whether the index should be unique</param>
 		/// <returns>Zero on success.</returns>
-		public int CreateIndex (string indexName, string tableName, string[] columnNames, bool unique = false)
+		public int CreateIndex (string indexName, string tableName, IReadOnlyList<string> columnNames, bool unique = false)
 		{
 			const string sqlFormat = "create {2} index if not exists \"{3}\" on \"{0}\"(\"{1}\")";
 			var sql = String.Format (sqlFormat, tableName, string.Join ("\", \"", columnNames), unique ? "unique" : "", indexName);
 			return Execute (sql);
 		}
 
-		/// <summary>
+        /// <summary>
 		/// Creates an index for the specified table and column.
 		/// </summary>
 		/// <param name="indexName">Name of the index to create</param>
@@ -949,8 +961,8 @@ namespace SQLite
 		}
 
 		void MigrateTable (TableMapping map, List<ColumnInfo> existingCols)
-		{
-			var toBeAdded = new List<TableMapping.Column> ();
+        {
+            var toBeAdded = ListPool<TableMapping.Column>.Shared.Take();
 
 			foreach (var p in map.Columns) {
 				var found = false;
@@ -968,6 +980,7 @@ namespace SQLite
 				var addCol = "alter table \"" + map.TableName + "\" add column " + Orm.SqlDecl (p, StoreDateTimeAsTicks, StoreTimeSpanAsTicks);
 				Execute (addCol);
 			}
+            ListPool<TableMapping.Column>.Shared.Return(toBeAdded);
 		}
 
 		/// <summary>
@@ -1004,6 +1017,19 @@ namespace SQLite
 			}
 			return cmd;
 		}
+
+        public SQLiteCommand CreateCommand (string cmdText, List<object> ps)
+        {
+            if (!_open)
+                throw SQLiteException.New (SQLite3.Result.Error, "Cannot create commands from unopened database");
+
+            var cmd = NewCommand ();
+            cmd.CommandText = cmdText;
+            foreach (var o in ps) {
+                cmd.Bind (o);
+            }
+            return cmd;
+        }
 
 		/// <summary>
 		/// Creates a new SQLiteCommand given the command text with named arguments. Place a "[@:$]VVV"
@@ -1942,13 +1968,18 @@ namespace SQLite
 				if (replacing) {
 					cols = map.InsertOrReplaceColumns;
 				}
-
+                var cnames1 = ListPool<string>.Shared.Take();
+                var cnames2 = ListPool<string>.Shared.Take();
+                foreach (var c in cols)
+                {
+                    cnames1.Add("\"" + c.Name + "\"");
+                    cnames2.Add("?");
+                }
 				insertSql = string.Format ("insert {3} into \"{0}\"({1}) values ({2})", map.TableName,
-								   string.Join (",", (from c in cols
-													  select "\"" + c.Name + "\"").ToArray ()),
-								   string.Join (",", (from c in cols
-													  select "?").ToArray ()), extra);
-
+								   string.Join (",", cnames1),
+								   string.Join (",", cnames2), extra);
+                ListPool<string>.Shared.Return(cnames1);
+                ListPool<string>.Shared.Return(cnames2);
 			}
 
 			var insertCommand = new PreparedSqlLiteInsertCommand (this, insertSql);
@@ -2003,35 +2034,59 @@ namespace SQLite
 				throw new NotSupportedException ("Cannot update " + map.TableName + ": it has no PK");
 			}
 
-			var cols = from p in map.Columns
-					   where p != pk
-					   select p;
-			var vals = from c in cols
-					   select c.GetValue (obj);
-			var ps = new List<object> (vals);
+            var cols = ListPool<TableMapping.Column>.Shared.Take();
+            var vals = ListPool<object>.Shared.Take();
+            foreach (var p in map.Columns)
+            {
+                if (p != pk) cols.Add(p);
+            }
+            foreach (var c in cols)
+            {
+                vals.Add(c.GetValue(obj));
+            }
+
+            var ps = ListPool<object>.Shared.Take(vals);
 			if (ps.Count == 0) {
 				// There is a PK but no accompanying data,
 				// so reset the PK to make the UPDATE work.
-				cols = map.Columns;
-				vals = from c in cols
-					   select c.GetValue (obj);
-				ps = new List<object> (vals);
+                cols.Clear();
+                vals.Clear();
+				cols.AddRange(map.Columns);
+                foreach (var c in cols)
+                {
+                    vals.Add(c.GetValue(obj));
+                }
+				ps.AddRange(vals);
 			}
-			ps.Add (pk.GetValue (obj));
-			var q = string.Format ("update \"{0}\" set {1} where \"{2}\" = ? ", map.TableName, string.Join (",", (from c in cols
-																												  select "\"" + c.Name + "\" = ? ").ToArray ()), pk.Name);
+			ps.Add(pk.GetValue (obj));
+            var cnames = ListPool<string>.Shared.Take();
+            foreach (var c in cols)
+            {
+                cnames.Add("\"" + c.Name + "\" = ? ");
+            }
+			var q = $"update \"{map.TableName}\" set {string.Join(",", cnames)} where \"{pk.Name}\" = ? ";
 
-			try {
-				rowsAffected = Execute (q, ps.ToArray ());
-			}
-			catch (SQLiteException ex) {
+            ListPool<TableMapping.Column>.Shared.Return(cols);
+            ListPool<object>.Shared.Return(vals);
+            ListPool<string>.Shared.Return(cnames);
 
-				if (ex.Result == SQLite3.Result.Constraint && SQLite3.ExtendedErrCode (this.Handle) == SQLite3.ExtendedResult.ConstraintNotNull) {
-					throw NotNullConstraintViolationException.New (ex, map, obj);
-				}
+            try
+            {
+                rowsAffected = Execute(q, ps.ToArray());
+            }
+            catch (SQLiteException ex)
+            {
 
-				throw;
-			}
+                if (ex.Result == SQLite3.Result.Constraint && SQLite3.ExtendedErrCode(this.Handle) == SQLite3.ExtendedResult.ConstraintNotNull)
+                {
+                    throw NotNullConstraintViolationException.New(ex, map, obj);
+                }
+
+                throw;
+            }
+            finally {
+                ListPool<object>.Shared.Return(ps);
+            }
 
 			if (rowsAffected > 0)
 				OnTableChanged (map, NotifyTableChangedAction.Update);
@@ -2580,25 +2635,45 @@ namespace SQLite
 #if ENABLE_IL2CPP
 			var tableAttr = typeInfo.GetCustomAttribute<TableAttribute> ();
 #else
-			var tableAttr =
-				typeInfo.CustomAttributes
-						.Where (x => x.AttributeType == typeof (TableAttribute))
-						.Select (x => (TableAttribute)Orm.InflateAttribute (x))
-						.FirstOrDefault ();
+            TableAttribute tableAttr = null;
+            foreach (var attr in typeInfo.CustomAttributes)
+            {
+                if (attr.AttributeType != typeof(TableAttribute)) continue;
+                tableAttr = (TableAttribute) Orm.InflateAttribute(attr);
+            }
 #endif
 
 			TableName = (tableAttr != null && !string.IsNullOrEmpty (tableAttr.Name)) ? tableAttr.Name : MappedType.Name;
-			WithoutRowId = tableAttr != null ? tableAttr.WithoutRowId : false;
+			WithoutRowId = tableAttr?.WithoutRowId ?? false;
 
-			var members = GetPublicMembers(type);
-			var cols = new List<Column>(members.Count);
-			foreach(var m in members)
-			{
-				var ignore = m.IsDefined(typeof(IgnoreAttribute), true);
-				if(!ignore)
-					cols.Add(new Column(m, createFlags));
-			}
-			Columns = cols.ToArray ();
+            var members = ListPool<MemberInfo>.Shared.Take();
+            GetPublicMembers(type, members);
+            unsafe
+            {
+                var flagmaps = stackalloc bool[members.Count];
+                var count = 0;
+                for (var i = 0; i < members.Count; i++)
+                {
+                    var ignore = members[i].IsDefined(typeof(IgnoreAttribute), true);
+                    if (!ignore)
+                    {
+                        flagmaps[i] = true;
+                        count++;
+                    }
+                }
+
+                Columns = new Column[count];
+                var index = 0;
+                for (var i = 0; i < members.Count; i++)
+                {
+                    if (flagmaps[i])
+                    {
+                        Columns[index++] = new Column(members[i], createFlags);
+                    }
+                }
+            }
+            ListPool<MemberInfo>.Shared.Return(members);
+
 			foreach (var c in Columns) {
 				if (c.IsAutoInc && c.IsPK) {
 					_autoPk = c;
@@ -2622,27 +2697,32 @@ namespace SQLite
 			_insertOrReplaceColumns = Columns.ToArray ();
 		}
 
-		private IReadOnlyCollection<MemberInfo> GetPublicMembers(Type type)
+		private void GetPublicMembers(Type type, List<MemberInfo> members)
 		{
-			if(type.Name.StartsWith("ValueTuple`"))
-				return GetFieldsFromValueTuple(type);
+            members.Clear();
+            if (type.Name.StartsWith("ValueTuple`"))
+            {
+				members.AddRange(GetFieldsFromValueTuple(type));
+            }
 
-			var members = new List<MemberInfo>();
-			var memberNames = new HashSet<string>();
-			var newMembers = new List<MemberInfo>();
+            var memberNames = HashSetPool<string>.Shared.Take();
+            var newMembers = ListPool<MemberInfo>.Shared.Take();
 			do
 			{
 				var ti = type.GetTypeInfo();
 				newMembers.Clear();
 
-				newMembers.AddRange(
-					from p in ti.DeclaredProperties
-					where !memberNames.Contains(p.Name) &&
-						p.CanRead && p.CanWrite &&
-						p.GetMethod != null && p.SetMethod != null &&
-						p.GetMethod.IsPublic && p.SetMethod.IsPublic &&
-						!p.GetMethod.IsStatic && !p.SetMethod.IsStatic
-					select p);
+                foreach (var p in ti.DeclaredProperties)
+                {
+                    if (!memberNames.Contains(p.Name) &&
+                        p.CanRead && p.CanWrite &&
+                        p.GetMethod != null && p.SetMethod != null &&
+                        p.GetMethod.IsPublic && p.SetMethod.IsPublic &&
+                        !p.GetMethod.IsStatic && !p.SetMethod.IsStatic)
+                    {
+                        newMembers.Add(p);
+                    }
+                }
 
 				members.AddRange(newMembers);
 				foreach(var m in newMembers)
@@ -2651,11 +2731,11 @@ namespace SQLite
 				type = ti.BaseType;
 			}
 			while(type != typeof(object));
-
-			return members;
+            HashSetPool<string>.Shared.Return(memberNames);
+            ListPool<MemberInfo>.Shared.Return(newMembers);
 		}
 
-		private IReadOnlyCollection<MemberInfo> GetFieldsFromValueTuple(Type type)
+		private FieldInfo[] GetFieldsFromValueTuple(Type type)
 		{
 			Method = MapMethod.ByPosition;
 			var fields = type.GetFields();
@@ -3923,14 +4003,14 @@ namespace SQLite
 				pred = pred != null ? Expression.AndAlso (pred, lambda.Body) : lambda.Body;
 			}
 
-			var args = new List<object> ();
+			var args = ListPool<object>.Shared.Take();
 			var cmdText = "delete from \"" + Table.TableName + "\"";
 			var w = CompileExpr (pred, args);
 			cmdText += " where " + w.CommandText;
 
 			var command = Connection.CreateCommand (cmdText, args.ToArray ());
-
 			int result = command.ExecuteNonQuery ();
+            ListPool<object>.Shared.Return(args);
 			return result;
 		}
 
@@ -4082,7 +4162,7 @@ namespace SQLite
 			}
 			else {
 				var cmdText = "select " + selectionList + " from \"" + Table.TableName + "\"";
-				var args = new List<object> ();
+                var args = ListPool<object>.Shared.Take();
 				if (_where != null) {
 					var w = CompileExpr (_where, args);
 					cmdText += " where " + w.CommandText;
@@ -4100,8 +4180,10 @@ namespace SQLite
 					}
 					cmdText += " offset " + _offset.Value;
 				}
-				return Connection.CreateCommand (cmdText, args.ToArray ());
-			}
+                var result = Connection.CreateCommand (cmdText, args);
+                ListPool<object>.Shared.Return(args);
+                return result;
+            }
 		}
 
 		class CompileResult
@@ -4443,7 +4525,7 @@ namespace SQLite
 		/// </summary>
 		public T[] ToArray ()
 		{
-			return GenerateCommand ("*").ExecuteQuery<T> ().ToArray ();
+			return GenerateCommand ("*").ExecuteDeferredQuery<T> ().ToArray ();
 		}
 
 		/// <summary>
@@ -4451,18 +4533,16 @@ namespace SQLite
 		/// </summary>
 		public T First ()
 		{
-			var query = Take (1);
-			return query.ToList ().First ();
+            return Take(1).GenerateCommand("*").ExecuteDeferredQuery<T>().First();
 		}
 
 		/// <summary>
 		/// Returns the first element of this query, or null if no element is found.
 		/// </summary>
 		public T FirstOrDefault ()
-		{
-			var query = Take (1);
-			return query.ToList ().FirstOrDefault ();
-		}
+        {
+            return Take(1).GenerateCommand("*").ExecuteDeferredQuery<T>().FirstOrDefault();
+        }
 
 		/// <summary>
 		/// Returns the first element of this query that matches the predicate.
