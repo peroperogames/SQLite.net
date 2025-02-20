@@ -1558,13 +1558,14 @@ namespace SQLite
 		{
 			List<Entry> entries;
 			lock (_entriesLock) {
-				entries = new List<Entry> (_entries.Values);
+				entries = ListPool<Entry>.Shared.Take(_entries.Values);
 				_entries.Clear ();
 			}
 
 			foreach (var e in entries) {
 				e.Close ();
 			}
+            ListPool<Entry>.Shared.Return(entries);
 		}
 	}
 
