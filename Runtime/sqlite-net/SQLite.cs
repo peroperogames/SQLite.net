@@ -273,6 +273,8 @@ namespace SQLite
 		private int _transactionDepth = 0;
 		private Random _rand = new Random ();
 
+        public Action<string> ExecutedWithoutQuery { get; set; }
+
 		public Sqlite3DatabaseHandle Handle { get; private set; }
 		static readonly Sqlite3DatabaseHandle NullHandle = default (Sqlite3DatabaseHandle);
 		static readonly Sqlite3BackupHandle NullBackupHandle = default (Sqlite3BackupHandle);
@@ -3155,6 +3157,7 @@ namespace SQLite
 			Finalize (stmt);
 			if (r == SQLite3.Result.Done) {
 				int rowsAffected = SQLite3.Changes (_conn.Handle);
+                _conn.ExecutedWithoutQuery?.Invoke(CommandText);
 				return rowsAffected;
 			}
 			else if (r == SQLite3.Result.Error) {
@@ -3807,7 +3810,7 @@ namespace SQLite
 
 		SQLiteConnection Connection;
 
-		string CommandText;
+		internal string CommandText;
 
 		Sqlite3Statement Statement;
 		static readonly Sqlite3Statement NullStatement = default (Sqlite3Statement);
@@ -3846,6 +3849,7 @@ namespace SQLite
 			if (r == SQLite3.Result.Done) {
 				int rowsAffected = SQLite3.Changes (Connection.Handle);
 				SQLite3.Reset (Statement);
+                Connection.ExecutedWithoutQuery?.Invoke(CommandText);
 				return rowsAffected;
 			}
 			else if (r == SQLite3.Result.Error) {
