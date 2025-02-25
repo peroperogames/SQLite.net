@@ -2,3 +2,6 @@
 *.o~
 Samples
 Samples.meta
+.idea/
+bin/
+obj/

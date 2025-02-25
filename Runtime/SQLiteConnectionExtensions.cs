@@ -28,7 +28,7 @@ using Unity.Collections.LowLevel.Unsafe;
 
 namespace SQLite
 {
-    public static class SQLiteConnectionExtensions
+    public static partial class SQLiteConnectionExtensions
     {
         public static byte[] Serialize(this SQLiteConnection db, string schema = null)
         {

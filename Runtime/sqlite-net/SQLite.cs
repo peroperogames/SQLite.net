@@ -274,6 +274,7 @@ namespace SQLite
 		private Random _rand = new Random ();
 
         public Action<string> ExecutedWithoutQuery { get; set; }
+        public event Action Rollbacked;
 
 		public Sqlite3DatabaseHandle Handle { get; private set; }
 		static readonly Sqlite3DatabaseHandle NullHandle = default (Sqlite3DatabaseHandle);
@@ -1547,11 +1548,13 @@ namespace SQLite
 				if (String.IsNullOrEmpty (savepoint)) {
 					if (Interlocked.Exchange (ref _transactionDepth, 0) > 0) {
 						Execute ("rollback");
-					}
+                        Rollbacked();
+                    }
 				}
 				else {
 					DoSavePointExecute (savepoint, "rollback to ");
-				}
+                    Rollbacked();
+                }
 			}
 			catch (SQLiteException) {
 				if (!noThrow)
@@ -2719,7 +2722,6 @@ namespace SQLite
                     if (!memberNames.Contains(p.Name) &&
                         p.CanRead && p.CanWrite &&
                         p.GetMethod != null && p.SetMethod != null &&
-                        p.GetMethod.IsPublic && p.SetMethod.IsPublic &&
                         !p.GetMethod.IsStatic && !p.SetMethod.IsStatic)
                     {
                         newMembers.Add(p);
@@ -3767,7 +3769,7 @@ namespace SQLite
 			if (isNullable) {
 				var setProperty = (Action<ObjectType, ColumnMemberType?>)Delegate.CreateDelegate (
 						typeof (Action<ObjectType, ColumnMemberType?>), null,
-						column.PropertyInfo.GetSetMethod ());
+						column.PropertyInfo.GetSetMethod (true));
 
 				return (o, stmt, i) => {
 					var colType = SQLite3.ColumnType (stmt, i);
@@ -3791,7 +3793,7 @@ namespace SQLite
 		{
 			var setProperty = (Action<ObjectType, ColumnMemberType>)Delegate.CreateDelegate (
 					typeof (Action<ObjectType, ColumnMemberType>), null,
-					column.PropertyInfo.GetSetMethod ());
+					column.PropertyInfo.GetSetMethod (true));
 
 			return (o, stmt, i) => {
 				var colType = SQLite3.ColumnType (stmt, i);
