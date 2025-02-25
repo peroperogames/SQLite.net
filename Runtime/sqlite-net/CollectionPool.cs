@@ -1,4 +1,9 @@
-using System;
+/*
+ * Copyright (c) PeroPeroGames Co., Ltd.
+ * Author: Gatongone
+ * Created On: 2025/02/19-18:21:56
+ */
+
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 
