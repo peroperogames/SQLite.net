@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) PeroPeroGames Co., Ltd.
+ * Author: Gatongone
+ * Created On: 2025/02/20-15:35:36
+ */
+
 using System.Collections.Generic;
 
 namespace SQLite
