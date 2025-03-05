@@ -22,6 +22,7 @@ namespace Gilzoide.SqliteNet.Tests.Editor
                 var row = new InternalRow();
                 var pk = row.GetPrimaryKey();
                 array.Add(row);
+                Assert.NotNull(row.InternalConnection);
                 Assert.IsTrue(db.Query<InternalRow>($"select * from {array.TableName}").Count == 1);
                 Assert.AreNotEqual(pk, row.GetPrimaryKey());
             }

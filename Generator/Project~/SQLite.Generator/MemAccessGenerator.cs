@@ -72,9 +72,18 @@ internal class MemAccessGenerator : ISourceGenerator
             {{@namespace}}
             partial class {{type.Name}}
             {
+            {{(ContainsEmptyCtor(type) ? string.Empty : $"    public {type.Name}() {{ }}")}}
             {{sb}}
             }{{(type.ContainingNamespace.IsGlobalNamespace ? "" : "}")}}
             """;
+    }
+
+    private bool ContainsEmptyCtor(ITypeSymbol type)
+    {
+        return type.GetMembers()
+                       .Where(m => m is IMethodSymbol method && method.MethodKind == MethodKind.Constructor)
+                       .Cast<IMethodSymbol>()
+                       .Any(ctor => ctor.Parameters.Length == 0);
     }
 }
 
