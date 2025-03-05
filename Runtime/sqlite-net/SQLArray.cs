@@ -11,7 +11,7 @@ using System.Reflection;
 
 namespace SQLite
 {
-    public class SQLArray<TObject> : ICollection<TObject> where TObject : SQLObject, new()
+    public sealed class SQLArray<TObject> : ICollection<TObject> where TObject : SQLObject, new()
     {
         private readonly  SQLiteConnection m_Conn;
         internal readonly List<TObject>    Table = new();
@@ -24,6 +24,7 @@ namespace SQLite
             get => Table[index];
             set
             {
+                value.InternalConnection = m_Conn;
                 if (m_Conn.IsInTransaction)
                 {
                     var origin = Table[index];
@@ -93,6 +94,7 @@ namespace SQLite
         {
             if (m_Conn.Insert(item) > 0)
             {
+                item.InternalConnection = m_Conn;
                 Table.Add(item);
             }
             else
@@ -105,6 +107,7 @@ namespace SQLite
         {
             if (m_Conn.Insert(item) > 0)
             {
+                item.InternalConnection = m_Conn;
                 Table.Add(item);
                 return true;
             }
