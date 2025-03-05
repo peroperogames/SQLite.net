@@ -11,7 +11,7 @@ using System.Reflection;
 
 namespace SQLite
 {
-    public class SQLTable<TPK, TObject> : ICollection<TObject> where TObject : SQLObject<TPK>, new()
+    public sealed class SQLTable<TPK, TObject> : ICollection<TObject> where TObject : SQLObject<TPK>, new()
     {
         internal readonly Dictionary<TPK, TObject> Table = new();
         private readonly  SQLiteConnection         m_Conn;
@@ -21,6 +21,7 @@ namespace SQLite
             get => Table[key];
             set
             {
+                value.InternalConnection = m_Conn;
                 if (Table.ContainsKey(value.GetPrimaryKey()))
                 {
                     if (m_Conn.IsInTransaction)
@@ -97,6 +98,7 @@ namespace SQLite
         {
             if (m_Conn.Insert(item) > 0)
             {
+                item.InternalConnection = m_Conn;
                 Table.Add(item.GetPrimaryKey(), item);
             }
             else
@@ -119,6 +121,7 @@ namespace SQLite
         {
             if (m_Conn.Insert(item) > 0)
             {
+                item.InternalConnection = m_Conn;
                 Table.Add(item.GetPrimaryKey(), item);
                 return true;
             }
