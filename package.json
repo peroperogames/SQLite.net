@@ -14,5 +14,9 @@
       "description": "Demonstrates a simple REPL for SQL statements.",
       "path": "Samples~/REPL"
     }
-  ]
+  ],
+  "dependencies": {
+    "com.prpr.cysharp.zstring": "2.5.1",
+    "com.prpr.native": "0.0.2"
+  }
 }

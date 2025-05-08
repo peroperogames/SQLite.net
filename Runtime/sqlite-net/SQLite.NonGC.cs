@@ -25,6 +25,7 @@ namespace SQLite
             {
                 col.Add(result);
             }
+            RecycleCommand(cmd);
         }
 
         public void Query(TableMapping map, string query, List<object> col, object[] args)
@@ -35,6 +36,7 @@ namespace SQLite
             {
                 col.Add(item);
             }
+            RecycleCommand(cmd);
         }
 
         public void QueryScalars<T>(string query, List<T> col, object[] args)
@@ -45,6 +47,7 @@ namespace SQLite
             {
                 col.Add(item);
             }
+            RecycleCommand(cmd);
         }
     }
 }
