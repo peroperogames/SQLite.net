@@ -7,7 +7,6 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.Reflection;
 
 namespace SQLite
 {
@@ -26,8 +25,7 @@ namespace SQLite
                 {
                     if (m_Conn.IsInTransaction)
                     {
-                        var origin = Table[key];
-                        m_Conn.Rollbacked += () => { Table[key] = origin; };
+                        m_Conn.RegisterRollbackHandler(RollbackHandler.Require(Table, key, Table[key]));
                     }
 
                     if (m_Conn.Update(value) > 0)
@@ -134,5 +132,35 @@ namespace SQLite
         IEnumerator<TObject> IEnumerable<TObject>.GetEnumerator() => GetEnumerator();
 
         IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+
+        public class RollbackHandler : IRollbackHandler
+        {
+            private static readonly Stack<RollbackHandler>   m_Pool = new();
+            private                 Dictionary<TPK, TObject> m_Table;
+            private                 TPK                      m_PK;
+            private                 TObject                  m_Origin;
+
+            public static RollbackHandler Require(Dictionary<TPK, TObject> table, TPK pk, TObject origin)
+            {
+                if (!m_Pool.TryPop(out var handler))
+                {
+                    handler = new RollbackHandler();
+                }
+
+                handler.m_Origin = origin;
+                handler.m_PK     = pk;
+                handler.m_Table  = table;
+                return handler;
+            }
+
+            public void OnRollback()
+            {
+                m_Table[m_PK] = m_Origin;
+                m_Table       = null;
+                m_Origin      = null;
+                m_PK          = default;
+                m_Pool.Push(this);
+            }
+        }
     }
 }
