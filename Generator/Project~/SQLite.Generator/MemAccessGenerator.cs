@@ -56,12 +56,34 @@ internal class MemAccessGenerator : ISourceGenerator
             sb.AppendLine($"        {property.Name} = value;");
             sb.AppendLine($"        if (Connection.IsInTransaction)");
             sb.AppendLine($"        {{");
-            sb.AppendLine($"            Connection.Rollbacked += () => {{ {property.Name} = origin; }};");
+            sb.AppendLine($"            Connection.RegisterRollbackHandler({property.Name}RollbackHandler.Require(this, origin));");
             sb.AppendLine($"            Connection.Update(this);");
             sb.AppendLine($"        }}");
             sb.AppendLine($"        else");
             sb.AppendLine($"        {{");
             sb.AppendLine($"            if (Connection.Update(this) <= 0) {property.Name} = origin;");
+            sb.AppendLine($"        }}");
+            sb.AppendLine($"    }}");
+
+            sb.AppendLine($"    private class {property.Name}RollbackHandler : SQLite.IRollbackHandler");
+            sb.AppendLine($"    {{");
+            sb.AppendLine($"        private static readonly System.Collections.Generic.Stack<{property.Name}RollbackHandler> m_Pool = new();");
+            sb.AppendLine($"        private {type.ToDisplayString()} m_Provider;");
+            sb.AppendLine($"        private {property.PropertyType.ToDisplayString()} m_Origin;");
+            sb.AppendLine($"        public static {property.Name}RollbackHandler Require({type.ToDisplayString()} provider,  {property.PropertyType.ToDisplayString()} origin)");
+            sb.AppendLine($"        {{");
+            sb.AppendLine($"            if (!m_Pool.TryPop(out var handler))");
+            sb.AppendLine($"                handler = new {property.Name}RollbackHandler();");
+            sb.AppendLine($"            handler.m_Provider = provider;");
+            sb.AppendLine($"            handler.m_Origin = origin;");
+            sb.AppendLine($"            return handler;");
+            sb.AppendLine($"        }}");
+            sb.AppendLine($"        void SQLite.IRollbackHandler.OnRollback()");
+            sb.AppendLine($"        {{");
+            sb.AppendLine($"            m_Provider.{property.Name} = m_Origin;");
+            sb.AppendLine($"            m_Origin = default;");
+            sb.AppendLine($"            m_Provider = null;");
+            sb.AppendLine($"            m_Pool.Push(this);");
             sb.AppendLine($"        }}");
             sb.AppendLine($"    }}");
         }
