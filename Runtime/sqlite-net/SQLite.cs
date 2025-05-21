@@ -3389,7 +3389,7 @@ namespace SQLite
 			Finalize (stmt);
 			if (r == SQLite3.Result.Done) {
 				int rowsAffected = SQLite3.Changes (_conn.Handle);
-                _conn.ExecutedWithoutQuery?.Invoke(CommandText);
+                _conn.ExecutedWithoutQuery?.Invoke(ToRealSQLText());
 				return rowsAffected;
 			}
 			else if (r == SQLite3.Result.Error) {
@@ -4134,7 +4134,7 @@ namespace SQLite
 	/// <summary>
 	/// Since the insert never changed, we only need to prepare once.
 	/// </summary>
-	class PreparedSqlLiteInsertCommand : IDisposable
+	partial class PreparedSqlLiteInsertCommand : IDisposable
 	{
 		bool Initialized;
 
@@ -4179,7 +4179,7 @@ namespace SQLite
 			if (r == SQLite3.Result.Done) {
 				int rowsAffected = SQLite3.Changes (Connection.Handle);
 				SQLite3.Reset (Statement);
-                Connection.ExecutedWithoutQuery?.Invoke(CommandText);
+                Connection.ExecutedWithoutQuery?.Invoke(ToRealSQLText(source));
 				return rowsAffected;
 			}
 			else if (r == SQLite3.Result.Error) {
