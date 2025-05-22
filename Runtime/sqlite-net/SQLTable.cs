@@ -7,6 +7,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Reflection;
 
 namespace SQLite
 {
@@ -46,7 +47,7 @@ namespace SQLite
         {
             m_Conn = conn;
             var cache = ListPool<TObject>.Shared.Take();
-            var typeInfo = typeof(TObject);
+            var typeInfo = typeof(TObject).GetTypeInfo();
 #if ENABLE_IL2CPP
 			var tableAttr = typeInfo.GetCustomAttribute<TableAttribute>();
 #else
