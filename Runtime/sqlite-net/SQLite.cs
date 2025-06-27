@@ -236,7 +236,9 @@ namespace SQLite
 		TableMapping GetMapping (Type type, CreateFlags createFlags = CreateFlags.None);
 		TableMapping GetMapping<T> (CreateFlags createFlags = CreateFlags.None);
 		List<SQLiteConnection.ColumnInfo> GetTableInfo (string tableName);
-		int Insert (object obj);
+        int CopyFrom<T>(IEnumerable<T> target, CreateFlags createFlags = CreateFlags.None, bool runInTransaction = true);
+		int CopyFrom(Type ty, IEnumerable target, CreateFlags createFlags = CreateFlags.None, bool runInTransaction = true);
+        int Insert (object obj);
 		int Insert (object obj, Type objType);
 		int Insert (object obj, string extra);
 		int Insert (object obj, string extra, Type objType);
@@ -660,6 +662,51 @@ namespace SQLite
 			var query = ZString.Format ("drop table if exists \"{0}\"", map.TableName);
 			return Execute (query);
 		}
+
+        /// <summary>
+        /// Executes a "create table if not exists" on the database. It also
+        /// creates any specified indexes on the columns of the table. It uses
+        /// a schema automatically generated from the specified type. You can
+        /// later access this schema by calling GetMapping.
+        /// </summary>
+        /// <returns>
+        /// Whether the table was created or migrated.
+        /// </returns>
+        public int CopyFrom(Type ty, IEnumerable target, CreateFlags createFlags = CreateFlags.None,
+            bool runInTransaction = true)
+        {
+            DropTable(GetMapping(ty, createFlags));
+            CreateTable(ty, createFlags);
+            
+            var c = 0;
+            if (runInTransaction) {
+                RunInTransaction (() => {
+                    foreach (var r in target) {
+                        c += InsertOrReplace(r);
+                    }
+                });
+            }
+            else {
+                foreach (var r in target) {
+                    c += InsertOrReplace(r);
+                }
+            }
+            return c;
+        }
+
+        /// <summary>
+        /// Executes a "create table if not exists" on the database. It also
+        /// creates any specified indexes on the columns of the table. It uses
+        /// a schema automatically generated from the specified type. You can
+        /// later access this schema by calling GetMapping.
+        /// </summary>
+        /// <returns>
+        /// Whether the table was created or migrated.
+        /// </returns>
+        public int CopyFrom<T>(IEnumerable<T> target, CreateFlags createFlags = CreateFlags.None, bool runInTransaction = true)
+        {
+            return CopyFrom(typeof(T), target, createFlags, runInTransaction);
+        }
 
 		/// <summary>
 		/// Executes a "create table if not exists" on the database. It also
