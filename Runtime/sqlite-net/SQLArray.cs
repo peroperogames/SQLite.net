@@ -8,6 +8,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
+using UnityEngine;
 
 namespace SQLite
 {
@@ -28,7 +29,8 @@ namespace SQLite
                 if (m_Conn.IsInTransaction)
                 {
                     var origin = Table[index];
-                    m_Conn.RegisterRollbackHandler(RollbackHandler.Require(Table, index, origin));
+                    m_Conn.TryGetSavePoint(out var savepoint);
+                    m_Conn.RegisterRollbackHandler(SetRollbackHandler.Require(Table, index, origin), savepoint);
                     if (m_Conn.Delete(origin) > 0 && m_Conn.Insert(value) > 0)
                     {
                         Table[index] = value;
@@ -73,6 +75,12 @@ namespace SQLite
         {
             if (m_Conn.Delete(item) > 0)
             {
+                if (m_Conn.IsInTransaction)
+                {
+                    m_Conn.TryGetSavePoint(out var savepoint);
+                    m_Conn.RegisterRollbackHandler(RemoveRollbackHandler.Require(Table, item), savepoint);
+                }
+
                 return Table.Remove(item);
             }
 
@@ -84,6 +92,12 @@ namespace SQLite
             var item = Table[index];
             if (m_Conn.Delete(item) > 0)
             {
+                if (m_Conn.IsInTransaction)
+                {
+                    m_Conn.TryGetSavePoint(out var savepoint);
+                    m_Conn.RegisterRollbackHandler(RemoveRollbackHandler.Require(Table, item, index), savepoint);
+                }
+
                 return Table.Remove(item);
             }
 
@@ -94,6 +108,12 @@ namespace SQLite
         {
             if (m_Conn.Insert(item) > 0)
             {
+                if (m_Conn.IsInTransaction)
+                {
+                    m_Conn.TryGetSavePoint(out var savepoint);
+                    m_Conn.RegisterRollbackHandler(AddRollbackHandler.Require(Table, item), savepoint);
+                }
+
                 item.InternalConnection = m_Conn;
                 Table.Add(item);
             }
@@ -107,6 +127,12 @@ namespace SQLite
         {
             if (m_Conn.Insert(item) > 0)
             {
+                if (m_Conn.IsInTransaction)
+                {
+                    m_Conn.TryGetSavePoint(out var savepoint);
+                    m_Conn.RegisterRollbackHandler(AddRollbackHandler.Require(Table, item), savepoint);
+                }
+
                 item.InternalConnection = m_Conn;
                 Table.Add(item);
                 return true;
@@ -117,6 +143,12 @@ namespace SQLite
 
         public void Clear()
         {
+            if (m_Conn.IsInTransaction)
+            {
+                m_Conn.TryGetSavePoint(out var savepoint);
+                m_Conn.RegisterRollbackHandler(ClearRollbackHandler.Require(Table), savepoint);
+            }
+
             m_Conn.DeleteAll<TObject>();
             Table.Clear();
         }
@@ -127,18 +159,18 @@ namespace SQLite
         IEnumerator<TObject> IEnumerable<TObject>.GetEnumerator() => GetEnumerator();
         IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 
-        public class RollbackHandler : IRollbackHandler
+        private sealed class SetRollbackHandler : IRollbackHandler
         {
-            private static readonly Stack<RollbackHandler> m_Pool = new();
-            private                 List<TObject>          m_Table;
-            private                 TObject                m_Origin;
-            private                 int                    m_Index;
+            private static readonly Stack<SetRollbackHandler> m_Pool = new();
+            private                 List<TObject>                  m_Table;
+            private                 TObject                        m_Origin;
+            private                 int                            m_Index;
 
-            public static RollbackHandler Require(List<TObject> table, int index, TObject origin)
+            public static SetRollbackHandler Require(List<TObject> table, int index, TObject origin)
             {
                 if (!m_Pool.TryPop(out var handler))
                 {
-                    handler = new RollbackHandler();
+                    handler = new SetRollbackHandler();
                 }
 
                 handler.m_Origin = origin;
@@ -153,6 +185,94 @@ namespace SQLite
                 m_Table          = null;
                 m_Origin         = null;
                 m_Index          = -1;
+                m_Pool.Push(this);
+            }
+        }
+
+        private sealed class AddRollbackHandler : IRollbackHandler
+        {
+            private static readonly Stack<AddRollbackHandler> m_Pool = new();
+            private                 List<TObject>             m_Table;
+            private                 TObject                   m_Item;
+
+            public static AddRollbackHandler Require(List<TObject> table, TObject item)
+            {
+                if (!m_Pool.TryPop(out var handler))
+                {
+                    handler = new AddRollbackHandler();
+                }
+
+                handler.m_Item  = item;
+                handler.m_Table = table;
+                return handler;
+            }
+
+            public void OnRollback()
+            {
+                m_Table.Remove(m_Item);
+                m_Table = null;
+                m_Item  = null;
+                m_Pool.Push(this);
+            }
+        }
+
+        private sealed class RemoveRollbackHandler : IRollbackHandler
+        {
+            private static readonly Stack<RemoveRollbackHandler> m_Pool = new();
+            private                 List<TObject>                m_Table;
+            private                 TObject                      m_Item;
+            private                 int                          m_Index;
+
+            public static RemoveRollbackHandler Require(List<TObject> table, TObject item, int index = -1)
+            {
+                if (!m_Pool.TryPop(out var handler))
+                {
+                    handler = new RemoveRollbackHandler();
+                }
+
+                handler.m_Index = index;
+                handler.m_Item  = item;
+                handler.m_Table = table;
+                return handler;
+            }
+
+            public void OnRollback()
+            {
+                if (m_Index == -1)
+                    m_Table.Add(m_Item);
+                else
+                    m_Table.Insert(m_Index, m_Item);
+                m_Table = null;
+                m_Item  = null;
+                m_Pool.Push(this);
+            }
+        }
+
+        private sealed class ClearRollbackHandler : IRollbackHandler
+        {
+            private static readonly Stack<ClearRollbackHandler> m_Pool = new();
+            private                 List<TObject>               m_Table;
+            private                 List<TObject>               m_Cache;
+
+            public static ClearRollbackHandler Require(List<TObject> table)
+            {
+                if (!m_Pool.TryPop(out var handler))
+                {
+                    handler = new ClearRollbackHandler();
+                }
+
+                handler.m_Table = table;
+                handler.m_Cache = ListPool<TObject>.Shared.Take();
+                handler.m_Cache.AddRange(table);
+                return handler;
+            }
+
+            public void OnRollback()
+            {
+                m_Table.AddRange(m_Cache);
+                ListPool<TObject>.Shared.Return(m_Cache);
+                m_Table = null;
+                m_Cache = null;
                 m_Pool.Push(this);
             }
         }
