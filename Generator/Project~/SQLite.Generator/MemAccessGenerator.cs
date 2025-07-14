@@ -56,7 +56,8 @@ internal class MemAccessGenerator : ISourceGenerator
             sb.AppendLine($"        {property.Name} = value;");
             sb.AppendLine($"        if (Connection.IsInTransaction)");
             sb.AppendLine($"        {{");
-            sb.AppendLine($"            Connection.RegisterRollbackHandler({property.Name}RollbackHandler.Require(this, origin));");
+            sb.AppendLine($"            Connection.TryGetSavePoint(out var savepoint);");
+            sb.AppendLine($"            Connection.RegisterRollbackHandler({property.Name}RollbackHandler.Require(this, origin), savepoint);");
             sb.AppendLine($"            Connection.Update(this);");
             sb.AppendLine($"        }}");
             sb.AppendLine($"        else");
