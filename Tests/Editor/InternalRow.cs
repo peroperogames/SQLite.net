@@ -13,5 +13,8 @@ namespace Gilzoide.SqliteNet.Tests.Editor
         [PrimaryKey, AutoIncrement]
         private int Id { get; set; }
         private int Value { get; set; }
+        public InternalRow(int id, int value) => (Id, Value) = (id, value);
+        public InternalRow(int value) => Value = value;
+        public override string ToString() => $"Id: {Id}, Value: {Value}";
     }
 }

@@ -76,8 +76,34 @@ namespace Gilzoide.SqliteNet.Tests.Editor
                     Assert.AreNotEqual(row.GetValue(), value);
                 }
                 catch (Exception) { }
+
                 db.Commit();
                 Assert.AreEqual(row.GetValue(), 0);
+            }
+        }
+
+        [Test]
+        public void RollbackTest()
+        {
+            using (var db = new SQLiteConnection(""))
+            {
+                db.CreateTable<InternalRow2>();
+                var row = new InternalRow2
+                {
+                    Id                 = 1,
+                    InternalConnection = db
+                };
+                db.Insert(row);
+                row.SetValue(123);
+                var savepoint = db.SaveTransactionPoint();
+                row.SetValue(234);
+                db.SaveTransactionPoint();
+                row.SetValue(345);
+                db.SaveTransactionPoint();
+                db.RollbackTo(savepoint);
+                var raw = db.Query<InternalRow2>($"select * from {nameof(InternalRow2)}")[0];
+                Assert.AreEqual(123, row.GetValue());
+                Assert.AreEqual(123, raw.GetValue());
             }
         }
     }

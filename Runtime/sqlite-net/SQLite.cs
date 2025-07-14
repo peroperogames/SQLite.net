@@ -211,6 +211,7 @@ namespace SQLite
 			where T3 : new()
 			where T4 : new()
 			where T5 : new();
+
 		CreateTablesResult CreateTables (CreateFlags createFlags = CreateFlags.None, params Type[] types);
 		IEnumerable<T> DeferredQuery<T> (string query, params object[] args) where T : new();
 		IEnumerable<object> DeferredQuery (TableMapping map, string query, params object[] args);
@@ -257,6 +258,8 @@ namespace SQLite
 		void RollbackTo (string savepoint);
 		void RunInTransaction (Action action);
 		string SaveTransactionPoint ();
+        void RegisterRollbackHandler(IRollbackHandler rollbackHandler, string savepoint);
+        bool TryGetSavePoint(out string savepoint);
 		TableQuery<T> Table<T> () where T : new();
 		int Update (object obj);
 		int Update (object obj, Type objType);
@@ -281,6 +284,8 @@ namespace SQLite
 
         public Action<string> ExecutedWithoutQuery { get; set; }
         private List<IRollbackHandler> _rollbackHandlers = new();
+        private Dictionary<string, List<IRollbackHandler>>  _spRollbackHandlers = new();
+        private Stack<string>          _savePointStack   = new();
 
 		public Sqlite3DatabaseHandle Handle { get; private set; }
 		static readonly Sqlite3DatabaseHandle NullHandle = default (Sqlite3DatabaseHandle);
@@ -442,9 +447,21 @@ namespace SQLite
 			connectionString.PostKeyAction?.Invoke (this);
 		}
 
-        public void RegisterRollbackHandler(IRollbackHandler rollbackHandler)
+        public void RegisterRollbackHandler(IRollbackHandler rollbackHandler, string savepoint)
         {
-            _rollbackHandlers.Add(rollbackHandler);
+            if (string.IsNullOrEmpty(savepoint))
+            {
+                _rollbackHandlers.Add(rollbackHandler);
+            }
+            else
+            {
+                if (!_spRollbackHandlers.TryGetValue(savepoint, out var handlers))
+                {
+                    handlers = new List<IRollbackHandler>();
+                    _spRollbackHandlers[savepoint] = handlers;
+                }
+                handlers.Add(rollbackHandler);
+            }
         }
 
 		/// <summary>
@@ -1595,7 +1612,9 @@ namespace SQLite
 			}
 		}
 
-		/// <summary>
+        public bool TryGetSavePoint(out string savepoint) => _savePointStack.TryPeek(out savepoint);
+
+        /// <summary>
 		/// Creates a savepoint in the database at the current point in the transaction timeline.
 		/// Begins a new transaction if one is not in progress.
 		///
@@ -1634,7 +1653,7 @@ namespace SQLite
 
 				throw;
 			}
-
+            _savePointStack.Push(retVal);
 			return retVal;
 		}
 
@@ -1668,20 +1687,45 @@ namespace SQLite
 				if (String.IsNullOrEmpty (savepoint)) {
 					if (Interlocked.Exchange (ref _transactionDepth, 0) > 0) {
 						Execute ("rollback");
+                        while (_savePointStack.TryPop(out var historySP))
+                        {
+                            if (_spRollbackHandlers.TryGetValue(historySP, out var handlers))
+                            {
+                                foreach (var handler in handlers)
+                                {
+                                    handler.OnRollback();
+                                }
+                                _spRollbackHandlers.Remove(historySP);
+                            }
+                        }
                         foreach (var rollbackHandler in _rollbackHandlers)
                         {
                             rollbackHandler.OnRollback();
                         }
                         _rollbackHandlers.Clear();
+                        _spRollbackHandlers.Clear();
+                        _savePointStack.Clear();
                     }
 				}
 				else {
 					DoSavePointExecute (savepoint, "rollback to ");
-                    foreach (var rollbackHandler in _rollbackHandlers)
+                    if (!_savePointStack.Contains(savepoint))
+                        throw new ArgumentException($"Savepoint '{savepoint}' does not exist.", savepoint);
+
+                    while (_savePointStack.TryPop(out var historySP))
                     {
-                        rollbackHandler.OnRollback();
+                        if (_spRollbackHandlers.Remove(historySP, out var rollbackHandlers))
+                        {
+                            foreach (var handler in rollbackHandlers)
+                            {
+                                handler.OnRollback();
+                            }
+                        }
+                        if (historySP == savepoint)
+                        {
+                            break;
+                        }
                     }
-                    _rollbackHandlers.Clear();
                 }
 			}
 			catch (SQLiteException) {
@@ -1704,6 +1748,31 @@ namespace SQLite
 		{
 			try {
 				DoSavePointExecute (savepoint, "release ");
+                var cache = ListPool<string>.Shared.Take();
+                while (_savePointStack.TryPop(out var historySP))
+                {
+                    if (historySP != savepoint)
+                    {
+                        cache.Add(historySP);
+                    }
+                    else
+                    {
+                        // 使用新的 savepoint ID 来保证内存回滚时，SQL 命令的连续性
+                        if(_spRollbackHandlers.TryGetValue(historySP, out var handlers))
+                        {
+                            var newSP = $"@DELETED{historySP}";
+                            _spRollbackHandlers.Remove(historySP);
+                            _spRollbackHandlers.Add(newSP, handlers);
+                            cache.Add(newSP);
+                        }
+                        break;
+                    }
+                }
+                for (var i = cache.Count - 1; i >= 0; i--)
+                {
+                    _savePointStack.Push(cache[i]);
+                }
+                ListPool<string>.Shared.Return(cache);
 			}
 			catch (SQLiteException ex) {
 				if (ex.Result == SQLite3.Result.Busy) {
@@ -1713,7 +1782,24 @@ namespace SQLite
 					// Writes to the database only happen at depth=0, so this failure will only happen then.
 					try {
 						Execute ("rollback");
-					}
+                        while (_savePointStack.TryPop(out var historySP))
+                        {
+                            if (_spRollbackHandlers.TryGetValue(historySP, out var handlers))
+                            {
+                                foreach (var handler in handlers)
+                                {
+                                    handler.OnRollback();
+                                }
+                            }
+                        }
+                        foreach (var handler in _rollbackHandlers)
+                        {
+                            handler.OnRollback();
+                        }
+                        _rollbackHandlers.Clear();
+                        _spRollbackHandlers.Clear();
+                        _savePointStack.Clear();
+                    }
 					catch {
 						// rollback can fail in all sorts of wonderful version-dependent ways. Let's just hope for the best
 					}
@@ -1755,6 +1841,9 @@ namespace SQLite
 			if (Interlocked.Exchange (ref _transactionDepth, 0) != 0) {
 				try {
 					Execute ("commit");
+                    _rollbackHandlers.Clear();
+                    _spRollbackHandlers.Clear();
+                    _savePointStack.Clear();
 				}
 				catch {
 					// Force a rollback since most people don't know this function can fail
@@ -1762,6 +1851,24 @@ namespace SQLite
 					// Calling rollback makes our _transactionDepth variable correct.
 					try {
 						Execute ("rollback");
+                        while (_savePointStack.TryPop(out var historySP))
+                        {
+                            if (_spRollbackHandlers.TryGetValue(historySP, out var handlers))
+                            {
+                                foreach (var handler in handlers)
+                                {
+                                    handler.OnRollback();
+                                }
+                            }
+                        }
+                        foreach (var handler in _rollbackHandlers)
+                        {
+                            handler.OnRollback();
+                        }
+
+                        _rollbackHandlers.Clear();
+                        _spRollbackHandlers.Clear();
+                        _savePointStack.Clear();
 					}
 					catch {
 						// rollback can fail in all sorts of wonderful version-dependent ways. Let's just hope for the best
