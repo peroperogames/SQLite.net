@@ -283,9 +283,9 @@ namespace SQLite
 		private Random _rand = new Random ();
 
         public Action<string> ExecutedWithoutQuery { get; set; }
-        private List<IRollbackHandler> _rollbackHandlers = new();
-        private Dictionary<string, List<IRollbackHandler>>  _spRollbackHandlers = new();
-        private Stack<string>          _savePointStack   = new();
+        private Stack<IRollbackHandler>                     _rollbackHandlers   = new();
+        private Dictionary<string, Stack<IRollbackHandler>> _spRollbackHandlers = new();
+        private Stack<string>                               _savePointStack     = new();
 
 		public Sqlite3DatabaseHandle Handle { get; private set; }
 		static readonly Sqlite3DatabaseHandle NullHandle = default (Sqlite3DatabaseHandle);
@@ -451,16 +451,16 @@ namespace SQLite
         {
             if (string.IsNullOrEmpty(savepoint))
             {
-                _rollbackHandlers.Add(rollbackHandler);
+                _rollbackHandlers.Push(rollbackHandler);
             }
             else
             {
                 if (!_spRollbackHandlers.TryGetValue(savepoint, out var handlers))
                 {
-                    handlers = new List<IRollbackHandler>();
+                    handlers = new Stack<IRollbackHandler>();
                     _spRollbackHandlers[savepoint] = handlers;
                 }
-                handlers.Add(rollbackHandler);
+                handlers.Push(rollbackHandler);
             }
         }
 
