@@ -282,6 +282,7 @@ namespace SQLite
 		private int _transactionDepth = 0;
 		private Random _rand = new Random ();
 
+        public Action<SQLite3.Result, SQLite3.ExtendedResult> OnIOError { get; set; }
         public Action<string> ExecutedWithoutQuery { get; set; }
         private Stack<IRollbackHandler>                     _rollbackHandlers   = new();
         private Dictionary<string, Stack<IRollbackHandler>> _spRollbackHandlers = new();
@@ -3546,18 +3547,27 @@ namespace SQLite
                 _conn.ExecutedWithoutQuery?.Invoke(ToRealSQLText());
 				return rowsAffected;
 			}
-			else if (r == SQLite3.Result.Error) {
-				string msg = SQLite3.GetErrmsg (_conn.Handle);
-				throw SQLiteException.New (r, msg);
-			}
-			else if (r == SQLite3.Result.Constraint) {
-				if (SQLite3.ExtendedErrCode (_conn.Handle) == SQLite3.ExtendedResult.ConstraintNotNull) {
-					throw NotNullConstraintViolationException.New (r, SQLite3.GetErrmsg (_conn.Handle));
-				}
-			}
 
-			throw SQLiteException.New (r, SQLite3.GetErrmsg (_conn.Handle));
-		}
+            string msg = SQLite3.GetErrmsg (_conn.Handle);
+            if (r is SQLite3.Result.IOError or SQLite3.Result.Full  || msg.Contains("unable to open database") || msg.Contains("database or disk is full"))
+            {
+                _conn.OnIOError?.Invoke(r, SQLite3.ExtendedErrCode(_conn.Handle));
+                return -1;
+            }
+
+            if (r == SQLite3.Result.Error) {
+             
+                throw SQLiteException.New (r, msg);
+            }
+
+            if (r == SQLite3.Result.Constraint) {
+                if (SQLite3.ExtendedErrCode (_conn.Handle) == SQLite3.ExtendedResult.ConstraintNotNull) {
+                    throw NotNullConstraintViolationException.New (r, msg);
+                }
+            }
+
+            throw SQLiteException.New (r, msg);
+        }
 
 		public IEnumerable<T> ExecuteDeferredQuery<T> ()
 		{
@@ -4328,28 +4338,31 @@ namespace SQLite
 					SQLiteCommand.BindParameter (Statement, i + 1, source[i], Connection.StoreDateTimeAsTicks, Connection.DateTimeStringFormat, Connection.StoreTimeSpanAsTicks);
 				}
 			}
-			r = SQLite3.Step (Statement);
 
+            r = SQLite3.Step(Statement);
 			if (r == SQLite3.Result.Done) {
 				int rowsAffected = SQLite3.Changes (Connection.Handle);
 				SQLite3.Reset (Statement);
                 Connection.ExecutedWithoutQuery?.Invoke(ToRealSQLText(source));
 				return rowsAffected;
 			}
-			else if (r == SQLite3.Result.Error) {
-				string msg = SQLite3.GetErrmsg (Connection.Handle);
-				SQLite3.Reset (Statement);
+
+            SQLite3.Reset (Statement);
+            var msg = SQLite3.GetErrmsg (Connection.Handle);
+            if (r is SQLite3.Result.IOError or SQLite3.Result.Full  || msg.Contains("unable to open database") || msg.Contains("database or disk is full"))
+            {
+                Connection.OnIOError?.Invoke(r, SQLite3.ExtendedErrCode(Connection.Handle));
+                return -1;
+            }
+            
+			if (r == SQLite3.Result.Error) {
 				throw SQLiteException.New (r, msg);
 			}
-			else if (r == SQLite3.Result.Constraint && SQLite3.ExtendedErrCode (Connection.Handle) == SQLite3.ExtendedResult.ConstraintNotNull) {
-				SQLite3.Reset (Statement);
-				throw NotNullConstraintViolationException.New (r, SQLite3.GetErrmsg (Connection.Handle));
+			if (r == SQLite3.Result.Constraint && SQLite3.ExtendedErrCode (Connection.Handle) == SQLite3.ExtendedResult.ConstraintNotNull) {
+				throw NotNullConstraintViolationException.New (r, msg);
 			}
-			else {
-				SQLite3.Reset (Statement);
-				throw SQLiteException.New (r, SQLite3.GetErrmsg (Connection.Handle));
-			}
-		}
+            throw SQLiteException.New (r, msg);
+        }
 
 		public void Dispose ()
 		{
@@ -5173,7 +5186,6 @@ namespace SQLite
 			NoticeRecoverWAL = (Result.Notice | (1 << 8)),
 			NoticeRecoverRollback = (Result.Notice | (2 << 8))
 		}
-
 
 		public enum ConfigOption : int
 		{
