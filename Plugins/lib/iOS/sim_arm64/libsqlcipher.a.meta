@@ -1,5 +1,5 @@
 fileFormatVersion: 2
-guid: 050d138e88a0d3b479d752d96c78449a
+guid: e7eb5aa05f3ea1346aaa2cc3a1fa3815
 PluginImporter:
   externalObjects: {}
   serializedVersion: 2
@@ -7,7 +7,7 @@ PluginImporter:
   executionOrder: {}
   defineConstraints: []
   isPreloaded: 0
-  isOverridable: 0
+  isOverridable: 1
   isExplicitlyReferenced: 0
   validateReferences: 1
   platformData:
@@ -22,13 +22,13 @@ PluginImporter:
         Exclude OSXUniversal: 1
         Exclude Win: 1
         Exclude Win64: 1
-        Exclude iOS: 1
-        Exclude tvOS: 0
+        Exclude iOS: 0
   - first:
       Android: Android
     second:
       enabled: 0
       settings:
+        AndroidSharedLibraryType: Executable
         CPU: ARMv7
   - first:
       Any: 
@@ -70,20 +70,12 @@ PluginImporter:
   - first:
       iPhone: iOS
     second:
-      enabled: 0
-      settings:
-        AddToEmbeddedBinaries: false
-        CPU: AnyCPU
-        CompileFlags: 
-        FrameworkDependencies: 
-  - first:
-      tvOS: tvOS
-    second:
       enabled: 1
       settings:
-        CPU: AnyCPU
+        AddToEmbeddedBinaries: false
+        CPU: ARM64Simulator
         CompileFlags: 
-        FrameworkDependencies: Security;
+        FrameworkDependencies: 
   userData: 
   assetBundleName: 
   assetBundleVariant: 
