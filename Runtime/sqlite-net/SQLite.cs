@@ -211,7 +211,6 @@ namespace SQLite
 			where T3 : new()
 			where T4 : new()
 			where T5 : new();
-
 		CreateTablesResult CreateTables (CreateFlags createFlags = CreateFlags.None, params Type[] types);
 		IEnumerable<T> DeferredQuery<T> (string query, params object[] args) where T : new();
 		IEnumerable<object> DeferredQuery (TableMapping map, string query, params object[] args);
@@ -3538,36 +3537,37 @@ namespace SQLite
 				_conn.Tracer?.Invoke (ZString.Concat("Executing: ", this));
 			}
 
-			var r = SQLite3.Result.OK;
 			var stmt = Prepare ();
-			r = SQLite3.Step (stmt);
-			Finalize (stmt);
-			if (r == SQLite3.Result.Done) {
-				int rowsAffected = SQLite3.Changes (_conn.Handle);
-                _conn.ExecutedWithoutQuery?.Invoke(ToRealSQLText());
-				return rowsAffected;
-			}
-
-            string msg = SQLite3.GetErrmsg (_conn.Handle);
-            if (r is SQLite3.Result.IOError or SQLite3.Result.Full  || msg.Contains("unable to open database") || msg.Contains("database or disk is full"))
-            {
-                _conn.OnIOError?.Invoke(r, SQLite3.ExtendedErrCode(_conn.Handle));
-                return -1;
-            }
-
-            if (r == SQLite3.Result.Error) {
-             
-                throw SQLiteException.New (r, msg);
-            }
-
-            if (r == SQLite3.Result.Constraint) {
-                if (SQLite3.ExtendedErrCode (_conn.Handle) == SQLite3.ExtendedResult.ConstraintNotNull) {
-                    throw NotNullConstraintViolationException.New (r, msg);
+			try {
+				// FIX: Use try/finally to ensure Finalize runs, and throw exceptions
+				// BEFORE finally block so GetErrmsg is called while error state is valid.
+				// See: https://github.com/praeclarum/sqlite-net/issues/1041
+				var r = SQLite3.Step (stmt);
+				if (r == SQLite3.Result.Done || r == SQLite3.Result.Row) {
+					int rowsAffected = SQLite3.Changes (_conn.Handle);
+                    _conn.ExecutedWithoutQuery?.Invoke(ToRealSQLText());
+					return rowsAffected;
+				}
+                string msg = SQLite3.GetErrmsg (_conn.Handle);
+                if (r is SQLite3.Result.IOError or SQLite3.Result.Full  || msg.Contains("unable to open database") || msg.Contains("database or disk is full"))
+                {
+                    _conn.OnIOError?.Invoke(r, SQLite3.ExtendedErrCode(_conn.Handle));
+                    return -1;
                 }
-            }
-
-            throw SQLiteException.New (r, msg);
-        }
+				if (r == SQLite3.Result.Error) {
+					throw SQLiteException.New (r, SQLite3.GetErrmsg (_conn.Handle));
+				}
+				if (r == SQLite3.Result.Constraint) {
+					if (SQLite3.ExtendedErrCode (_conn.Handle) == SQLite3.ExtendedResult.ConstraintNotNull) {
+						throw NotNullConstraintViolationException.New (r, SQLite3.GetErrmsg (_conn.Handle));
+					}
+				}
+				throw SQLiteException.New (r, SQLite3.GetErrmsg (_conn.Handle));
+			}
+			finally {
+				Finalize (stmt);
+			}
+		}
 
 		public IEnumerable<T> ExecuteDeferredQuery<T> ()
 		{
@@ -4325,8 +4325,6 @@ namespace SQLite
 				Connection.Tracer?.Invoke (ZString.Concat("Executing: ", CommandText));
 			}
 
-			var r = SQLite3.Result.OK;
-
 			if (!Initialized) {
 				Statement = SQLite3.Prepare2 (Connection.Handle, CommandText);
 				Initialized = true;
@@ -4339,30 +4337,36 @@ namespace SQLite
 				}
 			}
 
-            r = SQLite3.Step(Statement);
-			if (r == SQLite3.Result.Done) {
-				int rowsAffected = SQLite3.Changes (Connection.Handle);
+			try {
+				// FIX: Use try/finally to ensure Reset runs, and throw exceptions
+				// BEFORE finally block so GetErrmsg is called while error state is valid.
+				// See: https://github.com/praeclarum/sqlite-net/issues/1041
+				var r = SQLite3.Step (Statement);
+				if (r == SQLite3.Result.Done || r == SQLite3.Result.Row) {
+					int rowsAffected = SQLite3.Changes (Connection.Handle);
+                    Connection.ExecutedWithoutQuery?.Invoke(ToRealSQLText(source));
+					return rowsAffected;
+				}
+                var msg = SQLite3.GetErrmsg (Connection.Handle);
+                if (r is SQLite3.Result.IOError or SQLite3.Result.Full  || msg.Contains("unable to open database") || msg.Contains("database or disk is full"))
+                {
+                    Connection.OnIOError?.Invoke(r, SQLite3.ExtendedErrCode(Connection.Handle));
+                    return -1;
+                }
+				if (r == SQLite3.Result.Error) {
+					throw SQLiteException.New (r, SQLite3.GetErrmsg (Connection.Handle));
+				}
+				if (r == SQLite3.Result.Constraint) {
+					if (SQLite3.ExtendedErrCode (Connection.Handle) == SQLite3.ExtendedResult.ConstraintNotNull) {
+						throw NotNullConstraintViolationException.New (r, SQLite3.GetErrmsg (Connection.Handle));
+					}
+				}
+				throw SQLiteException.New (r, SQLite3.GetErrmsg (Connection.Handle));
+			}
+			finally {
 				SQLite3.Reset (Statement);
-                Connection.ExecutedWithoutQuery?.Invoke(ToRealSQLText(source));
-				return rowsAffected;
 			}
-
-            SQLite3.Reset (Statement);
-            var msg = SQLite3.GetErrmsg (Connection.Handle);
-            if (r is SQLite3.Result.IOError or SQLite3.Result.Full  || msg.Contains("unable to open database") || msg.Contains("database or disk is full"))
-            {
-                Connection.OnIOError?.Invoke(r, SQLite3.ExtendedErrCode(Connection.Handle));
-                return -1;
-            }
-            
-			if (r == SQLite3.Result.Error) {
-				throw SQLiteException.New (r, msg);
-			}
-			if (r == SQLite3.Result.Constraint && SQLite3.ExtendedErrCode (Connection.Handle) == SQLite3.ExtendedResult.ConstraintNotNull) {
-				throw NotNullConstraintViolationException.New (r, msg);
-			}
-            throw SQLiteException.New (r, msg);
-        }
+		}
 
 		public void Dispose ()
 		{
@@ -5186,6 +5190,7 @@ namespace SQLite
 			NoticeRecoverWAL = (Result.Notice | (1 << 8)),
 			NoticeRecoverRollback = (Result.Notice | (2 << 8))
 		}
+
 
 		public enum ConfigOption : int
 		{
