@@ -283,6 +283,21 @@ namespace SQLite
 
         public Action<SQLite3.Result, SQLite3.ExtendedResult> OnIOError { get; set; }
         public Action<string> ExecutedWithoutQuery { get; set; }
+
+        /// <summary>
+        /// Result of the last write error that ExecuteNonQuery turned into -1.
+        /// Kept so callers that must treat the write as failed can throw with
+        /// the original SQLite result and message.
+        /// </summary>
+        internal SQLite3.Result LastWriteErrorResult { get; private set; } = SQLite3.Result.OK;
+        internal string LastWriteErrorMessage { get; private set; }
+
+        internal void RecordWriteError (SQLite3.Result result, string message)
+        {
+            LastWriteErrorResult = result;
+            LastWriteErrorMessage = message;
+        }
+
         private Stack<IRollbackHandler>                     _rollbackHandlers   = new();
         private Dictionary<string, Stack<IRollbackHandler>> _spRollbackHandlers = new();
         private Stack<string>                               _savePointStack     = new();
@@ -677,7 +692,9 @@ namespace SQLite
 		public int DropTable (TableMapping map)
 		{
 			var query = ZString.Format ("drop table if exists \"{0}\"", map.TableName);
-			return Execute (query);
+			var result = Execute (query);
+			ThrowIfWriteFailed (result, "drop table", map.TableName);
+			return result;
 		}
 
         /// <summary>
@@ -692,20 +709,32 @@ namespace SQLite
         public int CopyFrom(Type ty, IEnumerable target, CreateFlags createFlags = CreateFlags.None,
             bool runInTransaction = true)
         {
-            DropTable(GetMapping(ty, createFlags));
+            var map = GetMapping(ty, createFlags);
+            DropTable(map);
             CreateTable(ty, createFlags);
-            
+
+            // Insert using the mapping that was used to create the table, not the
+            // runtime type of each element (see InsertOrReplace(obj), which calls
+            // Orm.GetType(obj)). Otherwise a CopyFrom(typeof(Base), List<Derived>)
+            // creates the Base table but inserts into the Derived table.
+            int InsertRow (object r)
+            {
+                var inserted = Insert(r, "OR REPLACE", ty);
+                ThrowIfWriteFailed(inserted, "insert into", map.TableName);
+                return inserted;
+            }
+
             var c = 0;
             if (runInTransaction) {
                 RunInTransaction (() => {
                     foreach (var r in target) {
-                        c += InsertOrReplace(r);
+                        c += InsertRow(r);
                     }
                 });
             }
             else {
                 foreach (var r in target) {
-                    c += InsertOrReplace(r);
+                    c += InsertRow(r);
                 }
             }
             return c;
@@ -782,7 +811,8 @@ namespace SQLite
 					query = ZString.Concat(query, " without rowid");
 				}
 
-				Execute (query);
+				var createResult = Execute (query);
+				ThrowIfWriteFailed (createResult, "create table", map.TableName);
 			}
 			else {
 				result = CreateTableResult.Migrated;
@@ -931,7 +961,9 @@ namespace SQLite
 		{
 			const string sqlFormat = "create {2} index if not exists \"{3}\" on \"{0}\"(\"{1}\")";
 			var sql = ZString.Format (sqlFormat, tableName, ZString.Join ("\", \"", columnNames), unique ? "unique" : "", indexName);
-			return Execute (sql);
+			var result = Execute (sql);
+			ThrowIfWriteFailed (result, "create index", indexName);
+			return result;
 		}
 
         /// <summary>
@@ -1053,7 +1085,8 @@ namespace SQLite
 
 			foreach (var p in toBeAdded) {
 				var addCol = ZString.Concat("alter table \"", map.TableName, "\" add column ", Orm.SqlDecl (p, StoreDateTimeAsTicks, StoreTimeSpanAsTicks));
-				Execute (addCol);
+				var alterResult = Execute (addCol);
+				ThrowIfWriteFailed (alterResult, "alter table", map.TableName);
 			}
             ListPool<TableMapping.Column>.Shared.Return(toBeAdded);
 		}
@@ -1226,6 +1259,22 @@ namespace SQLite
             RecycleCommand(cmd);
             return r;
         }
+
+		/// <summary>
+		/// ExecuteNonQuery returns -1 instead of throwing when the failure is an
+		/// I/O error or the database is full (see SQLiteCommand.ExecuteNonQuery).
+		/// For writes whose success later code depends on, treat that as a failure,
+		/// preserving the original SQLite result and message.
+		/// </summary>
+		void ThrowIfWriteFailed (int result, string operation, string tableName)
+		{
+			if (result < 0) {
+				var errorResult = LastWriteErrorResult == SQLite3.Result.OK ? SQLite3.Result.IOError : LastWriteErrorResult;
+				var errorMessage = string.IsNullOrEmpty (LastWriteErrorMessage) ? "unknown I/O error" : LastWriteErrorMessage;
+				throw SQLiteException.New (errorResult,
+					ZString.Format ("{0} \"{1}\" failed: {2}", operation, tableName, errorMessage));
+			}
+		}
 
 		/// <summary>
 		/// Creates a SQLiteCommand given the command text (SQL) with arguments. Place a '?'
@@ -3551,6 +3600,7 @@ namespace SQLite
                 string msg = SQLite3.GetErrmsg (_conn.Handle);
                 if (r is SQLite3.Result.IOError or SQLite3.Result.Full  || msg.Contains("unable to open database") || msg.Contains("database or disk is full"))
                 {
+                    _conn.RecordWriteError(r, msg);
                     _conn.OnIOError?.Invoke(r, SQLite3.ExtendedErrCode(_conn.Handle));
                     return -1;
                 }
@@ -3606,9 +3656,11 @@ namespace SQLite
 			}
 
 			var stmt = Prepare ();
+			TableMapping.Column[] cols = null;
+			Action<object, Sqlite3Statement, int>[] fastColumnSetters = null;
 			try {
-				var cols = ArrayPool<TableMapping.Column>.Shared.Take(SQLite3.ColumnCount (stmt));
-				var fastColumnSetters = ArrayPool<Action<object, Sqlite3Statement, int>>.Shared.Take(cols.Length);
+				cols = ArrayPool<TableMapping.Column>.Shared.Take(SQLite3.ColumnCount (stmt));
+				fastColumnSetters = ArrayPool<Action<object, Sqlite3Statement, int>>.Shared.Take(cols.Length);
 
 				if (map.Method == TableMapping.MapMethod.ByPosition)
 				{
@@ -3623,23 +3675,28 @@ namespace SQLite
 					}
 
                     var setArgs = ArrayPool<object>.Shared.Take(2);
-					for (int i = 0; i < cols.Length; i++) {						
-						var name = SQLite3.ColumnName16 (stmt, i);
-						cols[i] = map.FindColumn (name);
-						if (!typeof(T).IsValueType && cols[i] != null)
-							if (getSetter != null) {
-                                setArgs[0] = _conn;
-                                setArgs[1] = cols[i];
-								fastColumnSetters[i] = (Action<object, Sqlite3Statement, int>)getSetter.Invoke(null, setArgs);
-							}
-							else {
-								fastColumnSetters[i] = FastColumnSetter.GetFastSetter<T>(_conn, cols[i]);
-							}
+					try {
+						for (int i = 0; i < cols.Length; i++) {
+							var name = SQLite3.ColumnName16 (stmt, i);
+							cols[i] = map.FindColumn (name);
+							if (!typeof(T).IsValueType && cols[i] != null)
+								if (getSetter != null) {
+	                                setArgs[0] = _conn;
+	                                setArgs[1] = cols[i];
+									fastColumnSetters[i] = (Action<object, Sqlite3Statement, int>)getSetter.Invoke(null, setArgs);
+								}
+								else {
+									fastColumnSetters[i] = FastColumnSetter.GetFastSetter<T>(_conn, cols[i]);
+								}
+						}
 					}
-                    ArrayPool<object>.Shared.Return(setArgs);
+					finally {
+						ArrayPool<object>.Shared.Return(setArgs);
+					}
 				}
 
-				while (SQLite3.Step (stmt) == SQLite3.Result.Row) {
+				SQLite3.Result stepResult;
+				while ((stepResult = SQLite3.Step (stmt)) == SQLite3.Result.Row) {
 					var obj = Activator.CreateInstance (map.MappedType);
 					for (int i = 0; i < cols.Length; i++) {
 						if (cols[i] == null)
@@ -3657,10 +3714,24 @@ namespace SQLite
 					OnInstanceCreated (obj);
 					yield return (T)obj;
 				}
-                ArrayPool<TableMapping.Column>.Shared.Return(cols);
-                ArrayPool<Action<object, Sqlite3Statement, int>>.Shared.Return(fastColumnSetters);
+				// A Step error used to silently end the result set (for example
+				// `pragma table_info` reported "no columns" on an I/O error).
+				if (stepResult != SQLite3.Result.Done) {
+					if (stepResult is SQLite3.Result.IOError or SQLite3.Result.Full) {
+						_conn.OnIOError?.Invoke (stepResult, SQLite3.ExtendedErrCode (_conn.Handle));
+					}
+					throw SQLiteException.New (stepResult, SQLite3.GetErrmsg (_conn.Handle));
+				}
 			}
 			finally {
+				// Also runs when the caller stops enumerating early, so the pooled
+				// arrays are returned in every path.
+				if (cols != null) {
+					ArrayPool<TableMapping.Column>.Shared.Return(cols);
+				}
+				if (fastColumnSetters != null) {
+					ArrayPool<Action<object, Sqlite3Statement, int>>.Shared.Return(fastColumnSetters);
+				}
 				SQLite3.Finalize (stmt);
 			}
 		}
@@ -3707,7 +3778,8 @@ namespace SQLite
 				if (SQLite3.ColumnCount (stmt) < 1) {
 					throw new InvalidOperationException ("QueryScalars should return at least one column");
 				}
-				while (SQLite3.Step (stmt) == SQLite3.Result.Row) {
+				SQLite3.Result stepResult;
+				while ((stepResult = SQLite3.Step (stmt)) == SQLite3.Result.Row) {
 					var colType = SQLite3.ColumnType (stmt, 0);
 					var val = ReadCol (stmt, 0, colType, typeof (T));
 					if (val == null) {
@@ -3716,6 +3788,12 @@ namespace SQLite
 					else {
 						yield return (T)val;
 					}
+				}
+				if (stepResult != SQLite3.Result.Done) {
+					if (stepResult is SQLite3.Result.IOError or SQLite3.Result.Full) {
+						_conn.OnIOError?.Invoke (stepResult, SQLite3.ExtendedErrCode (_conn.Handle));
+					}
+					throw SQLiteException.New (stepResult, SQLite3.GetErrmsg (_conn.Handle));
 				}
 			}
 			finally {
@@ -4350,6 +4428,7 @@ namespace SQLite
                 var msg = SQLite3.GetErrmsg (Connection.Handle);
                 if (r is SQLite3.Result.IOError or SQLite3.Result.Full  || msg.Contains("unable to open database") || msg.Contains("database or disk is full"))
                 {
+                    Connection.RecordWriteError(r, msg);
                     Connection.OnIOError?.Invoke(r, SQLite3.ExtendedErrCode(Connection.Handle));
                     return -1;
                 }
