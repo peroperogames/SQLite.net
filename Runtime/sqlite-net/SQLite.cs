@@ -3656,9 +3656,11 @@ namespace SQLite
 			}
 
 			var stmt = Prepare ();
+			TableMapping.Column[] cols = null;
+			Action<object, Sqlite3Statement, int>[] fastColumnSetters = null;
 			try {
-				var cols = ArrayPool<TableMapping.Column>.Shared.Take(SQLite3.ColumnCount (stmt));
-				var fastColumnSetters = ArrayPool<Action<object, Sqlite3Statement, int>>.Shared.Take(cols.Length);
+				cols = ArrayPool<TableMapping.Column>.Shared.Take(SQLite3.ColumnCount (stmt));
+				fastColumnSetters = ArrayPool<Action<object, Sqlite3Statement, int>>.Shared.Take(cols.Length);
 
 				if (map.Method == TableMapping.MapMethod.ByPosition)
 				{
@@ -3673,20 +3675,24 @@ namespace SQLite
 					}
 
                     var setArgs = ArrayPool<object>.Shared.Take(2);
-					for (int i = 0; i < cols.Length; i++) {						
-						var name = SQLite3.ColumnName16 (stmt, i);
-						cols[i] = map.FindColumn (name);
-						if (!typeof(T).IsValueType && cols[i] != null)
-							if (getSetter != null) {
-                                setArgs[0] = _conn;
-                                setArgs[1] = cols[i];
-								fastColumnSetters[i] = (Action<object, Sqlite3Statement, int>)getSetter.Invoke(null, setArgs);
-							}
-							else {
-								fastColumnSetters[i] = FastColumnSetter.GetFastSetter<T>(_conn, cols[i]);
-							}
+					try {
+						for (int i = 0; i < cols.Length; i++) {
+							var name = SQLite3.ColumnName16 (stmt, i);
+							cols[i] = map.FindColumn (name);
+							if (!typeof(T).IsValueType && cols[i] != null)
+								if (getSetter != null) {
+	                                setArgs[0] = _conn;
+	                                setArgs[1] = cols[i];
+									fastColumnSetters[i] = (Action<object, Sqlite3Statement, int>)getSetter.Invoke(null, setArgs);
+								}
+								else {
+									fastColumnSetters[i] = FastColumnSetter.GetFastSetter<T>(_conn, cols[i]);
+								}
+						}
 					}
-                    ArrayPool<object>.Shared.Return(setArgs);
+					finally {
+						ArrayPool<object>.Shared.Return(setArgs);
+					}
 				}
 
 				SQLite3.Result stepResult;
@@ -3708,8 +3714,6 @@ namespace SQLite
 					OnInstanceCreated (obj);
 					yield return (T)obj;
 				}
-                ArrayPool<TableMapping.Column>.Shared.Return(cols);
-                ArrayPool<Action<object, Sqlite3Statement, int>>.Shared.Return(fastColumnSetters);
 				// A Step error used to silently end the result set (for example
 				// `pragma table_info` reported "no columns" on an I/O error).
 				if (stepResult != SQLite3.Result.Done) {
@@ -3720,6 +3724,14 @@ namespace SQLite
 				}
 			}
 			finally {
+				// Also runs when the caller stops enumerating early, so the pooled
+				// arrays are returned in every path.
+				if (cols != null) {
+					ArrayPool<TableMapping.Column>.Shared.Return(cols);
+				}
+				if (fastColumnSetters != null) {
+					ArrayPool<Action<object, Sqlite3Statement, int>>.Shared.Return(fastColumnSetters);
+				}
 				SQLite3.Finalize (stmt);
 			}
 		}
