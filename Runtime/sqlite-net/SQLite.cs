@@ -284,20 +284,6 @@ namespace SQLite
         public Action<SQLite3.Result, SQLite3.ExtendedResult> OnIOError { get; set; }
         public Action<string> ExecutedWithoutQuery { get; set; }
 
-        /// <summary>
-        /// Result of the last write error that ExecuteNonQuery turned into -1.
-        /// Kept so callers that must treat the write as failed can throw with
-        /// the original SQLite result and message.
-        /// </summary>
-        internal SQLite3.Result LastWriteErrorResult { get; private set; } = SQLite3.Result.OK;
-        internal string LastWriteErrorMessage { get; private set; }
-
-        internal void RecordWriteError (SQLite3.Result result, string message)
-        {
-            LastWriteErrorResult = result;
-            LastWriteErrorMessage = message;
-        }
-
         private Stack<IRollbackHandler>                     _rollbackHandlers   = new();
         private Dictionary<string, Stack<IRollbackHandler>> _spRollbackHandlers = new();
         private Stack<string>                               _savePointStack     = new();
@@ -692,9 +678,7 @@ namespace SQLite
 		public int DropTable (TableMapping map)
 		{
 			var query = ZString.Format ("drop table if exists \"{0}\"", map.TableName);
-			var result = Execute (query);
-			ThrowIfWriteFailed (result, "drop table", map.TableName);
-			return result;
+			return Execute (query);
 		}
 
         /// <summary>
@@ -717,24 +701,17 @@ namespace SQLite
             // runtime type of each element (see InsertOrReplace(obj), which calls
             // Orm.GetType(obj)). Otherwise a CopyFrom(typeof(Base), List<Derived>)
             // creates the Base table but inserts into the Derived table.
-            int InsertRow (object r)
-            {
-                var inserted = Insert(r, "OR REPLACE", ty);
-                ThrowIfWriteFailed(inserted, "insert into", map.TableName);
-                return inserted;
-            }
-
             var c = 0;
             if (runInTransaction) {
                 RunInTransaction (() => {
                     foreach (var r in target) {
-                        c += InsertRow(r);
+                        c += Insert(r, "OR REPLACE", ty);
                     }
                 });
             }
             else {
                 foreach (var r in target) {
-                    c += InsertRow(r);
+                    c += Insert(r, "OR REPLACE", ty);
                 }
             }
             return c;
@@ -811,8 +788,7 @@ namespace SQLite
 					query = ZString.Concat(query, " without rowid");
 				}
 
-				var createResult = Execute (query);
-				ThrowIfWriteFailed (createResult, "create table", map.TableName);
+				Execute (query);
 			}
 			else {
 				result = CreateTableResult.Migrated;
@@ -961,9 +937,7 @@ namespace SQLite
 		{
 			const string sqlFormat = "create {2} index if not exists \"{3}\" on \"{0}\"(\"{1}\")";
 			var sql = ZString.Format (sqlFormat, tableName, ZString.Join ("\", \"", columnNames), unique ? "unique" : "", indexName);
-			var result = Execute (sql);
-			ThrowIfWriteFailed (result, "create index", indexName);
-			return result;
+			return Execute (sql);
 		}
 
         /// <summary>
@@ -1085,8 +1059,7 @@ namespace SQLite
 
 			foreach (var p in toBeAdded) {
 				var addCol = ZString.Concat("alter table \"", map.TableName, "\" add column ", Orm.SqlDecl (p, StoreDateTimeAsTicks, StoreTimeSpanAsTicks));
-				var alterResult = Execute (addCol);
-				ThrowIfWriteFailed (alterResult, "alter table", map.TableName);
+				Execute (addCol);
 			}
             ListPool<TableMapping.Column>.Shared.Return(toBeAdded);
 		}
@@ -1259,22 +1232,6 @@ namespace SQLite
             RecycleCommand(cmd);
             return r;
         }
-
-		/// <summary>
-		/// ExecuteNonQuery returns -1 instead of throwing when the failure is an
-		/// I/O error or the database is full (see SQLiteCommand.ExecuteNonQuery).
-		/// For writes whose success later code depends on, treat that as a failure,
-		/// preserving the original SQLite result and message.
-		/// </summary>
-		void ThrowIfWriteFailed (int result, string operation, string tableName)
-		{
-			if (result < 0) {
-				var errorResult = LastWriteErrorResult == SQLite3.Result.OK ? SQLite3.Result.IOError : LastWriteErrorResult;
-				var errorMessage = string.IsNullOrEmpty (LastWriteErrorMessage) ? "unknown I/O error" : LastWriteErrorMessage;
-				throw SQLiteException.New (errorResult,
-					ZString.Format ("{0} \"{1}\" failed: {2}", operation, tableName, errorMessage));
-			}
-		}
 
 		/// <summary>
 		/// Creates a SQLiteCommand given the command text (SQL) with arguments. Place a '?'
@@ -3600,9 +3557,8 @@ namespace SQLite
                 string msg = SQLite3.GetErrmsg (_conn.Handle);
                 if (r is SQLite3.Result.IOError or SQLite3.Result.Full  || msg.Contains("unable to open database") || msg.Contains("database or disk is full"))
                 {
-                    _conn.RecordWriteError(r, msg);
                     _conn.OnIOError?.Invoke(r, SQLite3.ExtendedErrCode(_conn.Handle));
-                    return -1;
+                    throw SQLiteException.New (r, msg);
                 }
 				if (r == SQLite3.Result.Error) {
 					throw SQLiteException.New (r, SQLite3.GetErrmsg (_conn.Handle));
@@ -4416,9 +4372,8 @@ namespace SQLite
                 var msg = SQLite3.GetErrmsg (Connection.Handle);
                 if (r is SQLite3.Result.IOError or SQLite3.Result.Full  || msg.Contains("unable to open database") || msg.Contains("database or disk is full"))
                 {
-                    Connection.RecordWriteError(r, msg);
                     Connection.OnIOError?.Invoke(r, SQLite3.ExtendedErrCode(Connection.Handle));
-                    return -1;
+                    throw SQLiteException.New (r, msg);
                 }
 				if (r == SQLite3.Result.Error) {
 					throw SQLiteException.New (r, SQLite3.GetErrmsg (Connection.Handle));
