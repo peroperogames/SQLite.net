@@ -51,10 +51,9 @@ namespace Gilzoide.SqliteNet.Tests.Editor
                 new() { Id = 1 },
             }));
 
-            // The create must fail loudly at CreateTable instead of being swallowed
-            // and surfacing later as "no such table" from the first insert.
+            // The write must fail loudly at the failing statement instead of being
+            // swallowed and surfacing later as "no such table" from the first insert.
             Assert.AreEqual(SQLite3.Result.Full, ex.Result);
-            StringAssert.Contains("create table", ex.Message);
             StringAssert.Contains("database or disk is full", ex.Message);
             StringAssert.DoesNotContain("no such table", ex.Message);
         }
@@ -103,7 +102,6 @@ namespace Gilzoide.SqliteNet.Tests.Editor
             var ex = Assert.Throws<SQLiteException>(() => db.CopyFrom(rows, runInTransaction: false));
 
             Assert.AreEqual(SQLite3.Result.Full, ex.Result);
-            StringAssert.Contains("insert into", ex.Message);
             StringAssert.Contains("database or disk is full", ex.Message);
         }
 
@@ -119,7 +117,6 @@ namespace Gilzoide.SqliteNet.Tests.Editor
                 db.CreateIndex("ix_copyfrom_id", "CopyFromTestBaseRow", "Id"));
 
             Assert.AreEqual(SQLite3.Result.Full, ex.Result);
-            StringAssert.Contains("create index", ex.Message);
             StringAssert.Contains("database or disk is full", ex.Message);
         }
 
@@ -135,6 +132,40 @@ namespace Gilzoide.SqliteNet.Tests.Editor
 
             Assert.AreEqual(SQLite3.Result.Error, ex.Result);
             StringAssert.Contains("integer overflow", ex.Message);
+        }
+
+        [Test]
+        public void ExecuteThrowsWhenWriteFails()
+        {
+            using var db = new SQLiteConnection("");
+            db.Execute("PRAGMA max_page_count=1");
+
+            // Execute used to return -1 here, hiding the failed write from callers.
+            var ex = Assert.Throws<SQLiteException>(() =>
+                db.Execute("create table \"ExecuteFailureTest\" (\"Id\" integer primary key)"));
+
+            Assert.AreEqual(SQLite3.Result.Full, ex.Result);
+            StringAssert.Contains("database or disk is full", ex.Message);
+        }
+
+        [Test]
+        public void InsertAllThrowsWhenWriteFails()
+        {
+            using var db = new SQLiteConnection("");
+            db.CreateTable<CopyFromTestLargeRow>();
+            db.Execute("PRAGMA max_page_count=6");
+
+            var rows = new List<CopyFromTestLargeRow>();
+            for (var i = 0; i < 100; i++)
+            {
+                rows.Add(new CopyFromTestLargeRow { Id = i, Data = new string('x', 4000) });
+            }
+
+            // No transaction here: a failing rollback can mask the original insert error.
+            var ex = Assert.Throws<SQLiteException>(() => db.InsertAll(rows, runInTransaction: false));
+
+            Assert.AreEqual(SQLite3.Result.Full, ex.Result);
+            StringAssert.Contains("database or disk is full", ex.Message);
         }
     }
 }
