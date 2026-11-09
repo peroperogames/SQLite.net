@@ -16,6 +16,12 @@ namespace Gilzoide.SqliteNet.Tests.Editor
     [Table("CopyFromTestDerived")]
     public class CopyFromTestDerivedRow : CopyFromTestBaseRow { }
 
+    public class CopyFromTestLargeRow
+    {
+        [PrimaryKey] public int Id { get; set; }
+        public string Data { get; set; }
+    }
+
     public class TestSQL
     {
         [Test]
@@ -47,7 +53,9 @@ namespace Gilzoide.SqliteNet.Tests.Editor
 
             // The create must fail loudly at CreateTable instead of being swallowed
             // and surfacing later as "no such table" from the first insert.
+            Assert.AreEqual(SQLite3.Result.Full, ex.Result);
             StringAssert.Contains("create table", ex.Message);
+            StringAssert.Contains("database or disk is full", ex.Message);
             StringAssert.DoesNotContain("no such table", ex.Message);
         }
 
@@ -77,6 +85,56 @@ namespace Gilzoide.SqliteNet.Tests.Editor
             });
 
             Assert.AreEqual(1, db.ExecuteScalar<int>("select count(*) from \"CopyFromTestBaseRow\""));
+        }
+
+        [Test]
+        public void CopyFromThrowsWhenInsertFails()
+        {
+            using var db = new SQLiteConnection("");
+            db.Execute("PRAGMA max_page_count=6");
+
+            var rows = new List<CopyFromTestLargeRow>();
+            for (var i = 0; i < 100; i++)
+            {
+                rows.Add(new CopyFromTestLargeRow { Id = i, Data = new string('x', 4000) });
+            }
+
+            // No transaction here: a failing rollback can mask the original insert error.
+            var ex = Assert.Throws<SQLiteException>(() => db.CopyFrom(rows, runInTransaction: false));
+
+            Assert.AreEqual(SQLite3.Result.Full, ex.Result);
+            StringAssert.Contains("insert into", ex.Message);
+            StringAssert.Contains("database or disk is full", ex.Message);
+        }
+
+        [Test]
+        public void CreateIndexThrowsWhenWriteFails()
+        {
+            using var db = new SQLiteConnection("");
+            db.CreateTable<CopyFromTestBaseRow>();
+            db.Insert(new CopyFromTestBaseRow { Id = 1 });
+            db.Execute($"PRAGMA max_page_count={db.ExecuteScalar<int>("PRAGMA page_count")}");
+
+            var ex = Assert.Throws<SQLiteException>(() =>
+                db.CreateIndex("ix_copyfrom_id", "CopyFromTestBaseRow", "Id"));
+
+            Assert.AreEqual(SQLite3.Result.Full, ex.Result);
+            StringAssert.Contains("create index", ex.Message);
+            StringAssert.Contains("database or disk is full", ex.Message);
+        }
+
+        [Test]
+        public void QueryThrowsWhenStepFails()
+        {
+            using var db = new SQLiteConnection("");
+            db.CreateTable<CopyFromTestBaseRow>();
+
+            // The statement prepares fine, but stepping it raises "integer overflow".
+            var ex = Assert.Throws<SQLiteException>(() =>
+                db.Query<CopyFromTestBaseRow>("select abs(-9223372036854775808) as Id"));
+
+            Assert.AreEqual(SQLite3.Result.Error, ex.Result);
+            StringAssert.Contains("integer overflow", ex.Message);
         }
     }
 }

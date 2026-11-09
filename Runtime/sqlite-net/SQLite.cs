@@ -283,6 +283,21 @@ namespace SQLite
 
         public Action<SQLite3.Result, SQLite3.ExtendedResult> OnIOError { get; set; }
         public Action<string> ExecutedWithoutQuery { get; set; }
+
+        /// <summary>
+        /// Result of the last write error that ExecuteNonQuery turned into -1.
+        /// Kept so callers that must treat the write as failed can throw with
+        /// the original SQLite result and message.
+        /// </summary>
+        internal SQLite3.Result LastWriteErrorResult { get; private set; } = SQLite3.Result.OK;
+        internal string LastWriteErrorMessage { get; private set; }
+
+        internal void RecordWriteError (SQLite3.Result result, string message)
+        {
+            LastWriteErrorResult = result;
+            LastWriteErrorMessage = message;
+        }
+
         private Stack<IRollbackHandler>                     _rollbackHandlers   = new();
         private Dictionary<string, Stack<IRollbackHandler>> _spRollbackHandlers = new();
         private Stack<string>                               _savePointStack     = new();
@@ -1248,13 +1263,16 @@ namespace SQLite
 		/// <summary>
 		/// ExecuteNonQuery returns -1 instead of throwing when the failure is an
 		/// I/O error or the database is full (see SQLiteCommand.ExecuteNonQuery).
-		/// For writes whose success later code depends on, treat that as a failure.
+		/// For writes whose success later code depends on, treat that as a failure,
+		/// preserving the original SQLite result and message.
 		/// </summary>
 		void ThrowIfWriteFailed (int result, string operation, string tableName)
 		{
 			if (result < 0) {
-				throw SQLiteException.New (SQLite3.Result.IOError,
-					ZString.Format ("{0} \"{1}\" failed because of an I/O error or because the database is full (see OnIOError for details)", operation, tableName));
+				var errorResult = LastWriteErrorResult == SQLite3.Result.OK ? SQLite3.Result.IOError : LastWriteErrorResult;
+				var errorMessage = string.IsNullOrEmpty (LastWriteErrorMessage) ? "unknown I/O error" : LastWriteErrorMessage;
+				throw SQLiteException.New (errorResult,
+					ZString.Format ("{0} \"{1}\" failed: {2}", operation, tableName, errorMessage));
 			}
 		}
 
@@ -3582,6 +3600,7 @@ namespace SQLite
                 string msg = SQLite3.GetErrmsg (_conn.Handle);
                 if (r is SQLite3.Result.IOError or SQLite3.Result.Full  || msg.Contains("unable to open database") || msg.Contains("database or disk is full"))
                 {
+                    _conn.RecordWriteError(r, msg);
                     _conn.OnIOError?.Invoke(r, SQLite3.ExtendedErrCode(_conn.Handle));
                     return -1;
                 }
@@ -3694,6 +3713,9 @@ namespace SQLite
 				// A Step error used to silently end the result set (for example
 				// `pragma table_info` reported "no columns" on an I/O error).
 				if (stepResult != SQLite3.Result.Done) {
+					if (stepResult is SQLite3.Result.IOError or SQLite3.Result.Full) {
+						_conn.OnIOError?.Invoke (stepResult, SQLite3.ExtendedErrCode (_conn.Handle));
+					}
 					throw SQLiteException.New (stepResult, SQLite3.GetErrmsg (_conn.Handle));
 				}
 			}
@@ -3744,7 +3766,8 @@ namespace SQLite
 				if (SQLite3.ColumnCount (stmt) < 1) {
 					throw new InvalidOperationException ("QueryScalars should return at least one column");
 				}
-				while (SQLite3.Step (stmt) == SQLite3.Result.Row) {
+				SQLite3.Result stepResult;
+				while ((stepResult = SQLite3.Step (stmt)) == SQLite3.Result.Row) {
 					var colType = SQLite3.ColumnType (stmt, 0);
 					var val = ReadCol (stmt, 0, colType, typeof (T));
 					if (val == null) {
@@ -3753,6 +3776,12 @@ namespace SQLite
 					else {
 						yield return (T)val;
 					}
+				}
+				if (stepResult != SQLite3.Result.Done) {
+					if (stepResult is SQLite3.Result.IOError or SQLite3.Result.Full) {
+						_conn.OnIOError?.Invoke (stepResult, SQLite3.ExtendedErrCode (_conn.Handle));
+					}
+					throw SQLiteException.New (stepResult, SQLite3.GetErrmsg (_conn.Handle));
 				}
 			}
 			finally {
@@ -4387,6 +4416,7 @@ namespace SQLite
                 var msg = SQLite3.GetErrmsg (Connection.Handle);
                 if (r is SQLite3.Result.IOError or SQLite3.Result.Full  || msg.Contains("unable to open database") || msg.Contains("database or disk is full"))
                 {
+                    Connection.RecordWriteError(r, msg);
                     Connection.OnIOError?.Invoke(r, SQLite3.ExtendedErrCode(Connection.Handle));
                     return -1;
                 }
