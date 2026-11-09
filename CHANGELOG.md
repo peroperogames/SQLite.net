@@ -4,9 +4,15 @@
 - SQLiteException that were storing "not an error" messages now has the correct error messages
 - `CopyFrom` now inserts rows using the mapping of its `ty` argument instead of the runtime type of each row,
   which could fail with a misleading "no such table" error when the two types map to different tables
-- I/O errors and `SQLITE_FULL` during `DropTable`/`CreateTable`/`CreateIndex`/table migration, `CopyFrom` inserts
-  and query iteration are no longer silently swallowed; they now throw `SQLiteException` with the original
-  SQLite result and message instead of returning -1, truncated results or a delayed "no such table" error
+- I/O errors and `SQLITE_FULL` are no longer silently swallowed: `Execute`, `Insert`, `InsertAll`,
+  `InsertOrReplace`, `Update`, `Delete`, `DropTable`, `CreateTable`, `CreateIndex`, table migration,
+  `CopyFrom` inserts and query iteration now throw `SQLiteException` with the original SQLite result and
+  message instead of returning -1, truncated results or a delayed "no such table" error
+
+### Changed
+- Writing APIs (`Execute`, `Insert`, `InsertAll`, `InsertOrReplace`, `Update`, `Delete`) no longer return -1
+  on I/O errors or `SQLITE_FULL`, they throw `SQLiteException` instead; the `OnIOError` callback is still
+  invoked before throwing
 
 
 ## [1.3.2](https://github.com/gilzoide/unity-sqlite-net/tree/1.3.2)
